@@ -1,9 +1,11 @@
 # Assets
 
 **Logo files** (`logo-full.png`, `logo-mark.png`, `logo-word.png`, `favicon.png`)
-are the YME brand, recolored in September 2026 to the sharper palette used in
-`style.css`. In October 2026 the cross outline changed from red to steel `#5F6F8F`
-(light steel `#B9C2D3` in the dark files): a red cross on white is a protected
+are the YME brand, recolored in September 2026 (navy, red, steel and charcoal).
+They keep those colours: the site itself moved to charcoal and steel blue in
+October 2026, and the logo was deliberately left as it is. Also in October 2026
+the cross outline changed from red to steel `#5F6F8F` (light steel `#B9C2D3` in
+the dark files): a red cross on white is a protected
 emblem (18 U.S.C. § 706), so keep the cross out of red. The untouched originals,
 still with the old red cross, are in `logo-original/`; do not use them on the site.
 The white site header uses `logo-full.png`. `logo-full-dark.png` and

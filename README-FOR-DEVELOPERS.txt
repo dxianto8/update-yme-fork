@@ -44,7 +44,7 @@ assets/admin.js   /admin: the Sessions and Sign-Ups tabs
 assets/builder.js The Session Builder
 assets/readme.md  Where photos and board headshots live and how to replace them
 assets/board/     Headshots, one per member, named first-last.jpg
-assets/fonts/     Self-hosted fonts (Inter, Archivo; woff2) and their SIL Open Font License files
+assets/fonts/     Self-hosted font (Inter; woff2) and its SIL Open Font License file
 assets/logo-*.png Logo files (recoloured brand set); logo-*-dark.png are for dark backgrounds
 assets/logo-original/  The untouched original logo PNGs (old red cross; do not use)
 assets/photo-*.jpg     Page photos (small web copies; larger originals welcome)
@@ -84,7 +84,7 @@ HOW THINGS WORK
   Programs (All Programs, Free Tutoring, Upcoming Sessions) dropdowns, then
   Volunteer, Contact and the Donate button. Menus open on hover or click on desktop
   and become tap-to-expand sections in the mobile menu. On each page, that page's
-  own link (the Donate button on donate.html) carries aria-current="page"; a red
+  own link (the Donate button on donate.html) carries aria-current="page"; a steel blue
   underline marks it automatically.
 - Moving between pages cross-fades while the header stays still (CSS view
   transitions in style.css; browsers without support just load the page). Each page
@@ -97,31 +97,36 @@ HOW THINGS WORK
 - Forms post to FormSubmit (https://formsubmit.co) and arrive at
   youngmedicalengineers@gmail.com. The first submission from the live domain triggers
   a one-time activation email to that inbox; click the link in it once.
-- Fonts are self-hosted in assets/fonts (no serif typeface anywhere):
-  Archivo (regular width) for headlines, the red labels, footer titles,
-  numbers and the Free. Always. band; Inter for body text, nav, buttons and
-  forms. Keep them local; do not link to Google Fonts or
-  other font services. Archivo stands in for Univers, which is a paid Monotype
-  font: do not add Univers files to the site without a Monotype web licence.
+- One font, self-hosted in assets/fonts: Inter, a plain sans like Arial, for
+  everything (headlines, text, labels, numbers, buttons and forms). No serif
+  typeface anywhere. Keep it local; do not link to Google Fonts or other font
+  services.
 - Design rules the team settled on: plain Title Case headings, no italics, no icon
-  cards or boxed grids, no decorative rules above headings, no rounded corners (the
-  --radius tokens in style.css are all 0). Company colours: navy #1B365D, red
-  #C8102E, white #FFFFFF and blue-gray #EAF0F7 (tokens at the top of style.css).
-  The logo also uses steel #5F6F8F for its cross, which is steel, never red: a red
-  cross on white is a protected emblem (18 U.S.C. § 706).
+  cards or boxed grids, no decorative rules above headings, small corners (4 px on
+  buttons and tags, 6 px on cards; the --radius tokens in style.css). Site colours:
+  charcoal #1F2A33 and slate #2E3A44 for headings and dark panels, steel blue
+  #3F5F7F as the one accent, white #FFFFFF and cool gray #F1F3F5 for sections
+  (tokens at the top of style.css). The look should stay serious, educational and
+  humanitarian. The logo keeps its own colours (navy, red, steel and charcoal);
+  its cross is steel #5F6F8F, never red: a red cross on white is a protected emblem
+  (18 U.S.C. § 706).
 - Voice: warm and direct. On the inner pages the h1 is a friendly headline (for
-  example "Help Keep It Free") and the red eyebrow above it carries the page's
+  example "Help Keep It Free") and the steel blue eyebrow above it carries the page's
   plain name ("Donate"); text speaks to "you" and uses contractions. Only state
   facts the team has confirmed: no invented numbers, quotes or stories.
-- Layout patterns: a small red .eyebrow label above each page title; numbered
-  .pillars lists (01, 02, 03) for short groups of points; board cards are unboxed
-  (rounded photo with text underneath). Red is the only accent; use it sparingly.
-- Look and feel: warm and people-first, in the spirit of charity: water. Photo
-  sections (home hero, About and Programs headers, home Get Involved) are full-width
-  photos with white headlines and text on a soft dark fade; on phones the home
-  photo sits above its text. Other pages are white with blue-gray sections, navy
-  headings and icons, square buttons, and red for buttons, labels, the Free.
-  Always. band and the About page board banner.
+- Layout patterns: a small steel blue .eyebrow label above each page title;
+  numbered .pillars lists (01, 02, 03) for short groups of points; board cards are
+  unboxed (photo with text underneath). Steel blue is the only accent; use it
+  sparingly.
+- Look and feel: serious, educational and humanitarian. Photo sections (home hero,
+  About and Programs headers, home Get Involved) are full-width photos with white
+  headlines and text on a soft charcoal fade; on phones the home photo sits above
+  its text. Other pages are white with cool gray sections, charcoal headings, steel
+  blue buttons, links and labels, and charcoal panels (the Upcoming Sessions header,
+  the About page board banner).
+- Session dates: on the Upcoming Sessions tickets the date is a light gray tile
+  ("Nov / 14 / Sat"); on the home cards and on phones it is one line ("Sat, Nov
+  14"). Both are drawn by assets/sessions.js and arranged by style.css.
 - On the home page only, the header (class site-header--overlay) is transparent with
   a white logo over the photo and turns solid white once the page scrolls; the small
   script sets this, and without JavaScript the header simply stays white. While it is
