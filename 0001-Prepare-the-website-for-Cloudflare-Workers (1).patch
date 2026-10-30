@@ -1,0 +1,2347 @@
+From 63881dc2b49df8860de16c5213ce714a5528ab97 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 30 Oct 2026 05:00:56 +0000
+Subject: [PATCH 1/2] Prepare the website for Cloudflare Workers
+
+Replace the Vercel setup with a Cloudflare Worker that serves public/ and
+runs /admin, /api/sessions and /api/signups with the existing handlers.
+Pages keep their .html addresses; the Worker serves index.html at /.
+GitHub Pages keeps working until the domain moves.
+
+- worker.js and wrangler.jsonc (static assets, nodejs_compat)
+- tests/worker.test.js for the Worker's routing
+- CLOUDFLARE-SETUP.md replaces VERCEL-SETUP.md; READMEs updated
+- wrangler as a dev dependency, with npm run preview and npm run deploy
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01XvEVSd1jgW3w27ndoppwzE
+---
+ .gitignore                |    3 +-
+ .node-version             |    1 +
+ CLOUDFLARE-SETUP.md       |  136 ++++
+ README-FOR-ADAM.txt       |   44 +-
+ README-FOR-DEVELOPERS.txt |   47 +-
+ README.md                 |   16 +-
+ VERCEL-SETUP.md           |  103 ---
+ api/admin.js              |    2 -
+ api/sessions.js           |    3 -
+ api/signups.js            |    3 -
+ lib/admin-page.js         |    4 +-
+ lib/admin.js              |    2 +-
+ lib/auth.js               |    2 +-
+ lib/database.js           |    2 +-
+ lib/sessions.js           |    4 +-
+ lib/signups.js            |    4 +-
+ package-lock.json         | 1532 +++++++++++++++++++++++++++++++++++++
+ package.json              |    5 +
+ server.mjs                |    4 +-
+ tests/worker.test.js      |   32 +
+ vercel.json               |   11 -
+ worker.js                 |   23 +
+ wrangler.jsonc            |   17 +
+ 23 files changed, 1814 insertions(+), 186 deletions(-)
+ create mode 100644 .node-version
+ create mode 100644 CLOUDFLARE-SETUP.md
+ delete mode 100644 VERCEL-SETUP.md
+ delete mode 100644 api/admin.js
+ delete mode 100644 api/sessions.js
+ delete mode 100644 api/signups.js
+ create mode 100644 tests/worker.test.js
+ delete mode 100644 vercel.json
+ create mode 100644 worker.js
+ create mode 100644 wrangler.jsonc
+
+diff --git a/.gitignore b/.gitignore
+index d61ac1b..ac3ed2c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -2,4 +2,5 @@ node_modules/
+ data/
+ .env
+ .env.*
+-.vercel/
++.wrangler/
++.dev.vars*
+diff --git a/.node-version b/.node-version
+new file mode 100644
+index 0000000..a45fd52
+--- /dev/null
++++ b/.node-version
+@@ -0,0 +1 @@
++24
+diff --git a/CLOUDFLARE-SETUP.md b/CLOUDFLARE-SETUP.md
+new file mode 100644
+index 0000000..3139570
+--- /dev/null
++++ b/CLOUDFLARE-SETUP.md
+@@ -0,0 +1,136 @@
++# Put the YME website on Cloudflare with a Neon database
++
++The pages live in `public/`. A small Cloudflare Worker (`worker.js`) runs the session manager at **/admin** and the sign-ups at `/api/signups`. Admins sign in at /admin, fill in a form, and the session shows on **Upcoming Sessions** straight away, with its own sign-up page. Everyone who signs up is saved for admins to see on /admin (Sign-Ups tab) and is also emailed to the YME inbox. Sessions and sign-ups are stored in a Neon Postgres database.
++
++Cloudflare's free plan covers this site, including use by an organisation. Static pages are free and unlimited; only `/`, `/admin` and `/api/*` count towards the free 100,000 Worker requests a day.
++
++No passwords or connection strings belong in these files. They go in Cloudflare's settings as **secrets**.
++
++GitHub Pages keeps serving the site until step 7, so nothing goes offline while you set this up.
++
++## 1. Merge the Cloudflare files into `main`
++
++Cloudflare deploys from `main`, so `worker.js`, `wrangler.jsonc` and the updated `package.json` must be there first. Merging them doesn't change `public/`, so the GitHub Pages site keeps working.
++
++## 2. Create the Cloudflare account
++
++1. Sign up at **dash.cloudflare.com**. Use an organisation address, not a personal one.
++2. Turn on two-factor authentication (**My Profile → Authentication**) and keep the backup codes somewhere the board can reach, such as a shared password manager.
++3. Add a second person under **Manage Account → Members**, using an email that does **not** end in `@medengineers.org` (for example `youngmedicalengineers@gmail.com`). If the domain ever breaks, that person can still sign in and fix it.
++
++## 3. Create the Neon database
++
++1. Sign up at **neon.tech** with the same organisation address, and create a project (the free plan is enough). Pick the region closest to most visitors, for example **AWS US East**.
++2. Open the project's **SQL Editor**, paste in all of `db/schema.sql` and run it. It creates two tables: `sessions` and `signups`. Running it again later is safe; it only adds what's missing.
++3. Click **Connect** and copy the connection string. It starts with `postgresql://` and contains the database password, so keep it private.
++
++## 4. Create the Worker from GitHub
++
++1. In Cloudflare, open **Compute (Workers) → Workers & Pages → Create → Import a repository**.
++2. Connect GitHub when asked, and choose `adampark2010/Young-Medical-Engineers`.
++3. Fill in the settings:
++   - **Project name:** `yme-website`. It must match `"name"` in `wrangler.jsonc`, or the build fails.
++   - **Production branch:** `main`
++   - **Build command:** leave empty
++   - **Deploy command:** `npx wrangler deploy`
++   - **Root directory:** leave it at `/` (the folder holding `wrangler.jsonc`, never `public`)
++4. Click **Deploy** and wait for the build to finish. Cloudflare installs packages from `package-lock.json` itself.
++
++The site now works at `https://yme-website.<your-subdomain>.workers.dev`. `/admin` says logins aren't set yet; that's the next step.
++
++## 5. Add the secrets
++
++Open the Worker, then **Settings → Variables and Secrets → Add**. Add each of these with **Type: Secret** (not Text: Text values set here are removed the next time GitHub deploys the site).
++
++| Name | Value |
++| --- | --- |
++| `DATABASE_URL` | The Neon connection string from step 3 |
++| `ADMIN_LOGINS` | One `username:password` per admin, separated by commas |
++| `DELETE_PASSWORD` | A separate password needed to delete sessions and sign-ups |
++
++`ADMIN_LOGINS` looks like this:
++
++```
++derrick:a-long-password-only-derrick-knows,adam:a-different-long-password
++```
++
++- Usernames use letters, numbers, dots, dashes or underscores (up to 40). They are not case-sensitive.
++- Passwords can contain colons, but not commas. Spaces at the start or end are ignored.
++- The session list shows who added each session ("Added by derrick").
++
++`DELETE_PASSWORD` should differ from every admin's own password. Admins without it can still add sessions; they just can't delete any. Without it, deleting is switched off and /admin says so.
++
++Click **Deploy** after adding them. Saving a secret makes a new deployment, so changes work within a minute. To change a password, add someone or remove someone later, edit the secret the same way.
++
++## 6. Test on the workers.dev address
++
++1. Open `https://yme-website.<your-subdomain>.workers.dev/admin`. The browser asks for a username and password; use one of your `ADMIN_LOGINS` pairs.
++2. Add a clearly marked test session dated in the next few days. It shows under **On the Website**.
++3. Open `/sessions.html` in another tab. **Find a Session** appears with your test session, and it is in the sign-up form's list.
++4. Click **Sign Up** on the test session, fill in the form with your own email, and send it. You land on the confirmation page.
++5. Back on /admin, open the **Sign-Ups** tab: your test sign-up is listed under the session. The YME inbox gets an email too. (FormSubmit may send a one-time activation email for the new address; click the link in it once.)
++6. Tick the test sign-up, click **Delete Selected** and type your `DELETE_PASSWORD`. Then do the same for the test session on the **Sessions** tab. Reload Upcoming Sessions: it is gone, and a Get Notified panel shows while nothing is scheduled.
++7. Click through the other pages (Home, About, Programs, Board, Tutoring, Volunteer, Donate, Contact) and check that images and fonts load.
++
++## 7. Move medengineers.org to Cloudflare
++
++Do this only after step 6 works.
++
++1. In Cloudflare, choose **Add a domain**, enter `medengineers.org` and pick the **Free** plan. Cloudflare copies the domain's current DNS records.
++2. Check the copied records against the ones at the registrar. **Keep every MX and TXT record**: those run the domain's email. If any are missing, add them before going on.
++3. Delete the two kinds of record that point at GitHub Pages:
++   - `www` CNAME pointing to `adampark2010.github.io`
++   - `medengineers.org` A records `185.199.108.153`, `185.199.109.153`, `185.199.110.153`, `185.199.111.153` (and any AAAA records starting `2606:50c0:`)
++4. At the domain's registrar, replace the nameservers with the two Cloudflare shows. Whoever manages the domain makes this change. It usually takes effect within an hour, and occasionally up to a day; Cloudflare emails when the domain is active.
++5. Open the Worker, then **Settings → Domains & Routes → Add → Custom domain**. Add `www.medengineers.org`, then add `medengineers.org` the same way. Cloudflare creates the DNS records and HTTPS certificates itself.
++6. Open `https://www.medengineers.org/admin` and repeat the checks from step 6.
++
++The site goes down for at most a few minutes between deleting the GitHub records (step 3) and the custom domains being ready (step 5). Doing steps 3 to 5 together keeps that short.
++
++## 8. Turn off GitHub Pages
++
++Once the site loads from Cloudflare on both addresses:
++
++1. In GitHub, open **Settings → Pages** and click **Unpublish site**.
++2. Delete `.github/workflows/deploy.yml` (and `public/CNAME`, which only GitHub Pages uses), so pushes to `main` stop starting a Pages deployment.
++3. Update `README.md` so it no longer describes GitHub Pages.
++
++## Day to day
++
++- **Publishing:** every push or merge to `main` deploys the site. The Worker's **Deployments** tab shows each one.
++- **Undoing a bad deploy:** **Deployments → … → Rollback** on an earlier version.
++- **Preview links:** Cloudflare builds other branches too and comments a preview link on their pull requests. Previews use the **same** secrets and the **same** Neon database as the live site, so anything added on a preview shows on the real site. Mark test sessions clearly and delete them.
++- **Errors:** open the Worker's **Observability** tab for logs. The Worker never logs passwords or form contents.
++
++## If something fails
++
++- **Build fails with a name mismatch:** the Worker's name in Cloudflare must be `yme-website`, the same as `"name"` in `wrangler.jsonc`.
++- **Build fails with "Missing entry-point" or no `wrangler.jsonc`:** `main` doesn't have the Cloudflare files yet (step 1), or Root directory isn't `/`.
++- **"The database is not connected. Set DATABASE_URL…":** check the secret's name, spelled exactly `DATABASE_URL`.
++- **"No admin logins are set…":** add `ADMIN_LOGINS` as a secret.
++- **Secrets vanish after a push:** they were added as Text, not Secret. Add them again as Secret.
++- **"A database table is missing…":** run `db/schema.sql` (again) in the Neon project that `DATABASE_URL` points at.
++- **Sign-ups arrive by email but not on /admin:** the `signups` table is missing (run `db/schema.sql` again), or the session came from `sessions.json` (those sign-ups go by email only).
++- **"Deleting is switched off…":** add `DELETE_PASSWORD` as a secret.
++- **"That delete password is not right":** nothing was deleted. Check the `DELETE_PASSWORD` secret (it is not your admin password).
++- **The sign-in box keeps coming back:** the username or password doesn't match `ADMIN_LOGINS`. Check for a stray comma.
++- **"Sessions are temporarily unavailable" or "Saving is temporarily unavailable":** check that the Neon project is running and the connection string is right, then look at the Worker's Observability logs. Never share the connection string publicly.
++- **"Please manage sessions from the YME admin page":** the save came from a different address. Add sessions on /admin at the same address as the site.
++- **The custom domain won't add:** an old `www` CNAME or apex A record from GitHub Pages is still in Cloudflare's DNS (step 7.3).
++
++## Signing out
++
++The browser remembers the sign-in until it is fully closed. On a shared computer, use a private window and close it afterwards.
++
++## Local development
++
++```
++npm ci
++npm start
++```
++
++This runs `server.mjs` at http://127.0.0.1:3000 with a local SQLite database in `data/`. Nothing it saves goes to Neon. It prints a temporary admin login and delete password, or uses your own if you start it with `ADMIN_LOGINS="derrick:some-password" DELETE_PASSWORD="another-password" npm start`.
++
++To run the real Cloudflare Worker instead, create a file named `.dev.vars` (it is ignored by git) holding `DATABASE_URL`, `ADMIN_LOGINS` and `DELETE_PASSWORD`, one `NAME="value"` per line, then run `npm run preview` and open http://localhost:8787. With a real Neon connection string this reads and writes that database, so use a separate Neon branch for testing.
++
++`npm test` checks sign-in, validation, adding and deleting sessions, signing up, the Worker's routing and the local SQLite store, with a simulated database. It does not connect to Neon; check the live database with the steps in section 6.
+diff --git a/README-FOR-ADAM.txt b/README-FOR-ADAM.txt
+index 5e3ebc0..d9fa24a 100644
+--- a/README-FOR-ADAM.txt
++++ b/README-FOR-ADAM.txt
+@@ -1,37 +1,21 @@
+-Young Medical Engineers website - new version (October 2026)
++Young Medical Engineers website (October 2026)
+ 
+-This is the complete site, set up the same way as the Lunch project: the pages,
+-styles, fonts and images are in public/, and a small server (api/ and lib/) runs the
+-session manager at /admin. Admins sign in there, fill in a form, and the session
+-shows on Upcoming Sessions straight away, with its own sign-up page. Sign-ups are
+-saved for admins (the Sign-Ups tab on /admin) and emailed to the YME inbox.
+-Sessions and sign-ups are stored in a Neon database.
++The pages, styles, fonts and images are in public/. A small Cloudflare Worker
++(worker.js, with the code in lib/) runs the session manager at /admin. Admins sign in
++there, fill in a form, and the session shows on Upcoming Sessions straight away, with
++its own sign-up page. Sign-ups are saved for admins (the Sign-Ups tab on /admin) and
++emailed to the YME inbox. Sessions and sign-ups are stored in a Neon database.
+ 
+-GitHub Pages can only serve plain files, so the site now publishes through Vercel.
+-VERCEL-SETUP.md has every step: create the Vercel project, add Neon, set the admin
+-logins, run db/schema.sql, redeploy, test, then point medengineers.org at Vercel.
+-
+-IF THE REPOSITORY STILL HOLDS THE OLD STATIC SITE
+-1. In your local copy of the repository, delete everything except the hidden .git folder.
+-2. Copy these files in, so that public/, api/, lib/, db/, tests/, package.json,
+-   package-lock.json, vercel.json and server.mjs sit at the top level. Leave out
+-   node_modules, data and any .env file.
+-3. git add -A && git commit -m "Redesign website" && git push
+-4. Follow VERCEL-SETUP.md. The pages now live in public/, so GitHub Pages on its own
+-   would show a 404: set up Vercel and move the domain before relying on the new
+-   version, then turn GitHub Pages off.
+-
+-IF THE REPOSITORY IS NOW THE ASTRO BUILD (src/, astro.config.mjs, .github/workflows)
+-This version does not go through Astro. Either:
+-- Replace the Astro site with it: remove src/, public/, scripts/, astro.config.mjs,
+-  package.json, package-lock.json, tsconfig.json and .github/workflows, add these files
+-  at the top level, and follow VERCEL-SETUP.md.
+-- Or keep Astro and port this design into it. The copy, images, board data and
+-  styles are all here to copy from (public/assets/style.css holds every colour and
+-  type token). The session manager would then need porting too.
++MOVING FROM GITHUB PAGES TO CLOUDFLARE
++CLOUDFLARE-SETUP.md has every step: merge these files into main, create the Cloudflare
++and Neon accounts, connect the repository, add the secrets, test on the workers.dev
++address, move medengineers.org, then turn GitHub Pages off. GitHub Pages keeps serving
++the site until the end, so nothing goes offline in between.
+ 
+ Notes
+-- Admin logins and the database connection go in Vercel's settings, never in files.
++- Admin logins and the database connection go in Cloudflare's settings as secrets,
++  never in files.
++- Every push to main deploys the site on Cloudflare once it is set up.
+ - public/assets/readme.md explains where photos and board headshots live and how to
+   replace them.
+ - public/impact.html and public/mission.html are intentionally one-line redirects
+diff --git a/README-FOR-DEVELOPERS.txt b/README-FOR-DEVELOPERS.txt
+index 543cc3f..44c8cc7 100644
+--- a/README-FOR-DEVELOPERS.txt
++++ b/README-FOR-DEVELOPERS.txt
+@@ -2,16 +2,17 @@ Young Medical Engineers website - developer notes (October 2026)
+ 
+ WHAT THIS IS
+ Plain HTML pages, one stylesheet and images in public/, plus a small server for the
+-session manager, built the same way as Lunch: two Vercel functions in api/ and a Neon
+-Postgres database. No framework and no build step. To run it on your computer:
++session manager: a Cloudflare Worker (worker.js) and a Neon Postgres database. No
++framework and no build step. To run it on your computer:
+   npm ci
+   npm start          then visit http://127.0.0.1:3000 (session manager: /admin)
+ npm start runs server.mjs with a local SQLite database in data/ and prints a
+-temporary admin login. npm test runs the server tests. VERCEL-SETUP.md explains
+-how to put it online.
++temporary admin login. npm test runs the server tests. npm run preview runs the
++real Cloudflare Worker locally (see CLOUDFLARE-SETUP.md). CLOUDFLARE-SETUP.md
++explains how to put it online.
+ 
+ FILES
+-Pages and images (public/, the folder Vercel publishes):
++Pages and images (public/, the folder Cloudflare publishes):
+ index.html        Home: photo hero, Who We Are, What We Do, Coming Up (the next three
+                   sessions, or a Get Notified line when none), Free. Always. band,
+                   Our Impact So Far (the three numbers), Get Involved, footer
+@@ -49,17 +50,21 @@ assets/logo-*.png Logo files (recoloured brand set); logo-*-dark.png are for dar
+ assets/logo-original/  The untouched original logo PNGs (old red cross; do not use)
+ assets/photo-*.jpg     Page photos (small web copies; larger originals welcome)
+ assets/og-card.jpg     1200x630 image used for social-media link previews
+-CNAME             Custom domain for GitHub Pages (www.medengineers.org). Vercel ignores it.
++CNAME             Custom domain for GitHub Pages (www.medengineers.org). Cloudflare ignores it.
+ robots.txt, sitemap.xml   Search-engine files; update sitemap.xml if pages are added
+ 
+ Server (top level, next to public/):
+-api/sessions.js   /api/sessions: anyone can read upcoming sessions; signed-in admins
++worker.js         The Cloudflare Worker. It answers three addresses and leaves every
++                  other one to the files in public/:
++                  /api/sessions: anyone can read upcoming sessions; signed-in admins
+                   add (POST) them, and delete (DELETE) several at once with the
+                   separate delete password
+-api/signups.js    /api/signups: anyone signs up from the website (POST); signed-in admins
+-                  list sign-ups (GET) and delete them with the delete password
+-api/admin.js      /admin: asks for an admin sign-in, then shows the session manager
+-lib/              The code behind them: sign-in and the delete password (auth.js),
++                  /api/signups: anyone signs up from the website (POST); signed-in
++                  admins list sign-ups (GET) and delete them with the delete password
++                  /admin: asks for an admin sign-in, then shows the session manager
++                  It also serves index.html at /, because pages keep their .html
++                  addresses (html_handling "none" in wrangler.jsonc).
++lib/              The code behind it: sign-in and the delete password (auth.js),
+                   request helpers (http.js), sessions (sessions.js), sign-ups
+                   (signups.js), the /admin page (admin.js, admin-page.js), the Neon
+                   database (database.js) and the local SQLite one (sqlite-store.js)
+@@ -67,9 +72,12 @@ db/schema.sql     Creates the sessions and signups tables; run it in Neon (again
+                   any update that adds a table; it never erases anything)
+ tests/            npm test (uses a simulated database, never Neon)
+ server.mjs        Local server for npm start (SQLite in data/, not Neon)
+-package.json, package-lock.json, vercel.json   Node 24, the Neon driver, and Vercel's
+-                  settings (publish public/, send /admin to api/admin.js)
+-VERCEL-SETUP.md   Step-by-step setup on Vercel and Neon, and moving medengineers.org
++wrangler.jsonc    Cloudflare's settings: publish public/, run worker.js for /, /api/*
++                  and /admin, and turn on Node compatibility (node:crypto, Buffer)
++package.json, package-lock.json   Node 24, the Neon driver, and wrangler (Cloudflare's
++                  tool, for npm run preview and deploying)
++CLOUDFLARE-SETUP.md   Step-by-step setup on Cloudflare and Neon, and moving
++                  medengineers.org
+ 
+ HOW THINGS WORK
+ - Header, navigation and footer are repeated in every page. A change to them must be
+@@ -136,11 +144,11 @@ HOW THINGS WORK
+   seamless.
+ - To add a session, go to /admin, sign in with your own admin login, fill in the
+   form and click Add to Website. It shows on Upcoming Sessions straight away. Each
+-  admin has their own username and password, set in Vercel as ADMIN_LOGINS (see
+-  VERCEL-SETUP.md); the list on /admin shows who added what. Everything typed is
++  admin has their own username and password, set in Cloudflare as ADMIN_LOGINS (see
++  CLOUDFLARE-SETUP.md); the list on /admin shows who added what. Everything typed is
+   shown as plain text, never as HTML.
+ - To delete sessions, tick them in the list on /admin (or Select all), click Delete
+-  Selected, and type the delete password. That is a separate password set in Vercel
++  Selected, and type the delete password. That is a separate password set in Cloudflare
+   as DELETE_PASSWORD, like Lunch's clear password: only people who know it can
+   delete, and without it deleting is switched off. Deleting can't be undone.
+ - Upcoming Sessions: visitors filter by type and by in person or online (the choice
+@@ -168,5 +176,6 @@ HOW THINGS WORK
+   visible number and the data-count value).
+ 
+ PUBLISHING
+-The site runs on Vercel with a Neon database: see VERCEL-SETUP.md. Logins and the
+-database connection are set in Vercel's settings, never in these files.
++The site runs on Cloudflare Workers with a Neon database: see CLOUDFLARE-SETUP.md.
++Logins and the database connection are set as secrets in Cloudflare's settings, never
++in these files. Every push to main deploys the site.
+diff --git a/README.md b/README.md
+index 754ec4b..b6983a7 100644
+--- a/README.md
++++ b/README.md
+@@ -3,7 +3,15 @@
+ The website's ready-to-publish HTML, styles, images and fonts live in `public/`.
+ There is no frontend build step.
+ 
+-## Publish on GitHub Pages
++## Moving to Cloudflare
++
++The site is moving from GitHub Pages to Cloudflare Workers, which also runs the
++`/admin` session manager and saves sign-ups in a Neon database. `worker.js` and
++`wrangler.jsonc` hold the Cloudflare setup. Follow
++[CLOUDFLARE-SETUP.md](CLOUDFLARE-SETUP.md) step by step. GitHub Pages keeps
++serving the site until its last steps, so nothing goes offline in between.
++
++## Publish on GitHub Pages (until the move)
+ 
+ 1. In `adampark2010/Young-Medical-Engineers`, open **Settings → Pages**.
+ 2. Under **Build and deployment**, set **Source** to **GitHub Actions**.
+@@ -34,8 +42,8 @@ triggers another deployment. Sessions from this file and other forms send email
+ through FormSubmit; the inbox owner must activate FormSubmit for the live domain
+ when prompted. There is no database signup list or admin login on Pages.
+ 
+-For server-backed administration and database signups, use the separate
+-[Vercel and Neon instructions](VERCEL-SETUP.md).
++For server-backed administration and database signups, use the
++[Cloudflare and Neon instructions](CLOUDFLARE-SETUP.md).
+ 
+ ## Local development
+ 
+@@ -50,3 +58,5 @@ npm test
+ `npm start` runs the local server with SQLite in the ignored `data/` directory.
+ To preview exactly the static folder that Pages publishes, run
+ `python3 -m http.server 8080 --directory public` instead.
++`npm run preview` runs the real Cloudflare Worker at http://localhost:8787; it
++reads its settings from a `.dev.vars` file (see CLOUDFLARE-SETUP.md).
+diff --git a/VERCEL-SETUP.md b/VERCEL-SETUP.md
+deleted file mode 100644
+index b3d9b67..0000000
+--- a/VERCEL-SETUP.md
++++ /dev/null
+@@ -1,103 +0,0 @@
+-# Put the YME website on Vercel with a Neon database
+-
+-The website is now set up like Lunch: the pages live in `public/`, and small server functions in `api/` run the session manager and sign-ups. Admins sign in at **/admin**, fill in a form, and the session shows on **Upcoming Sessions** straight away, with its own sign-up page. Everyone who signs up is saved for admins to see on **/admin** (Sign-Ups tab) and is also emailed to the YME inbox. Sessions and sign-ups are stored in a Neon Postgres database. No passwords or connection strings belong in these files; they go in Vercel's settings.
+-
+-GitHub Pages can only serve plain files, so the session manager needs Vercel (or another host that runs Node.js functions). Every other page still works as plain HTML.
+-
+-## 1. Create the Vercel project
+-
+-1. In Vercel, choose **Add New → Project** and import the GitHub repository.
+-2. **Root Directory:** leave it at `.`. It must be the folder holding `vercel.json` and `package.json`, never `public`.
+-3. **Framework Preset:** **Other**. `vercel.json` already sets Output Directory `public`, Install Command `npm ci` and an empty Build Command. Node.js 24.x is set in `package.json`.
+-4. Deploy. The pages work at once. `/admin` and the session list wait for steps 2 to 5.
+-
+-Vercel's free Hobby plan is meant for personal, non-commercial projects. Check that it fits an organisation's website, or use a team plan.
+-
+-## 2. Add a Neon database
+-
+-In the project, open **Storage**, create a **Neon** database and connect it to this project. The integration adds the connection setting for you.
+-
+-The site reads it as `DATABASE_URL`. If the integration named it differently, add `DATABASE_URL` yourself in **Settings → Environment Variables** with the same value. Keep it secret.
+-
+-## 3. Add the admin logins
+-
+-In **Settings → Environment Variables**, add `ADMIN_LOGINS` for **Production**. Give each admin their own username and password, written `username:password`, separated by commas:
+-
+-```
+-derrick:a-long-password-only-derrick-knows,adam:a-different-long-password
+-```
+-
+-- Usernames use letters, numbers, dots, dashes or underscores (up to 40). They are not case-sensitive.
+-- Passwords can contain colons, but not commas. Spaces at the start or end are ignored.
+-- The session list shows who added each session ("Added by derrick").
+-- To change a password, add someone, or remove someone, edit `ADMIN_LOGINS` and redeploy (step 5).
+-
+-Then add `DELETE_PASSWORD` for **Production** (and Preview, if you test on preview links). This is a separate password that `/admin` asks for every time someone deletes sessions, the same idea as Lunch's clear password:
+-
+-- Make it different from every admin's own password, and share it only with people who should be able to delete.
+-- Admins without it can still add sessions; they just can't delete any.
+-- Without `DELETE_PASSWORD`, deleting is switched off and `/admin` says so.
+-- To change it, edit the value and redeploy.
+-
+-## 4. Create the tables
+-
+-Open the connected Neon database's **SQL Editor**. Paste in the contents of `db/schema.sql` and run it. It creates two tables: `sessions` and `signups`.
+-
+-**Already set up before sign-ups were added?** Run `db/schema.sql` again. It uses `CREATE TABLE IF NOT EXISTS`, so it only adds what's missing and never erases sessions or sign-ups. Use the same Neon database and branch as Production's `DATABASE_URL`.
+-
+-## 5. Redeploy
+-
+-Open **Deployments**, choose the latest deployment's menu, and select **Redeploy**. Wait until it is Ready. Changes to environment variables only take effect in a new deployment.
+-
+-## 6. Test it
+-
+-1. Open `https://<your-project>.vercel.app/admin`. The browser asks for a username and password; use your `ADMIN_LOGINS` pair.
+-2. Add a clearly marked test session dated in the next few days. It shows under **On the Website**.
+-3. Open `/sessions.html` in another tab. **Find a Session** now appears with your test session, and it is in the sign-up form's list.
+-4. Click **Sign Up** on the test session, fill in the form with your own email, and send it. You land on the confirmation page.
+-5. Back on `/admin`, open the **Sign-Ups** tab: your test sign-up is listed under the session. The YME inbox gets an email too. (The first sign-up from a new address can trigger a one-time FormSubmit activation email; click the link in it once.)
+-6. Tick the test sign-up, click **Delete Selected** and type your `DELETE_PASSWORD`. Then do the same for the test session on the **Sessions** tab. Reload Upcoming Sessions: it is gone, and a Get Notified panel shows while nothing is scheduled.
+-
+-## Moving medengineers.org to Vercel
+-
+-Do this in the repository and domain that publish the real site, and only once the Vercel project for it works.
+-
+-1. Push or upload these files to the real repository. Keep `api/`, `lib/`, `db/`, `public/`, `tests/`, `package.json`, `package-lock.json`, `vercel.json` and `server.mjs` side by side at its top level. Never upload `node_modules`, `data`, or any `.env` file.
+-2. Follow steps 1 to 6 above for a Vercel project connected to that repository.
+-3. In that project, open **Settings → Domains** and add `www.medengineers.org` and `medengineers.org`. Vercel shows the DNS records to set at the domain's registrar. Whoever manages the domain makes that change.
+-4. Once Vercel shows the domains as valid and the site loads on them, turn off GitHub Pages in the real repository (**Settings → Pages**).
+-
+-**Important:** after this change the pages are in `public/`, not at the top of the repository. A GitHub Pages site that publishes the repository's top level would show a 404, so set up Vercel before or together with pushing this version to the real repository. `public/CNAME` only matters to GitHub Pages; Vercel ignores it.
+-
+-## If something fails
+-
+-- **404 on /admin or /api/sessions:** check that Root Directory is `.`, and that `api/` and `vercel.json` are in the commit Vercel deployed.
+-- **"The database is not connected. Set DATABASE_URL…":** check the variable's name and Production scope, then redeploy.
+-- **"No admin logins are set…":** add `ADMIN_LOGINS` for Production and redeploy.
+-- **"A database table is missing…":** run `db/schema.sql` (again) in the database that Production uses.
+-- **Sign-ups arrive by email but not on /admin:** the `signups` table is missing (run `db/schema.sql` again), or the session came from `sessions.json` (those sign-ups go by email only).
+-- **"Deleting is switched off…":** add `DELETE_PASSWORD` for the environment you're using and redeploy.
+-- **"That delete password is not right":** nothing was deleted. Check the `DELETE_PASSWORD` value in Vercel (it is not your admin password), and redeploy after any change.
+-- **The sign-in box keeps coming back:** the username or password doesn't match `ADMIN_LOGINS`. Check for a stray comma, then redeploy after any change.
+-- **"Saving…", "Signing up…", "Deleting…" or "Sessions are temporarily unavailable":** check the Neon integration and the function logs in Vercel. Never share the connection string publicly.
+-- **"Please manage sessions from the YME admin page":** the save came from a different address. Add sessions on `/admin` at the same address as the site.
+-
+-## Signing out
+-
+-The browser remembers the sign-in until it is fully closed. On a shared computer, use a private window and close it afterwards.
+-
+-## Local development
+-
+-```
+-npm ci
+-npm start
+-```
+-
+-This runs `server.mjs` at http://127.0.0.1:3000 with a local SQLite database in `data/`. Nothing it saves goes to Neon. It prints a temporary admin login and delete password for http://127.0.0.1:3000/admin, or uses your own if you start it with `ADMIN_LOGINS="derrick:some-password" DELETE_PASSWORD="another-password" npm start`.
+-
+-`npm test` checks sign-in, validation, adding and deleting sessions, and signing up (including repeats, bots and the delete password) with a simulated database, plus the local SQLite store. It does not connect to Neon; check the live database with the steps in section 6.
+-
+-Official references:
+-- https://vercel.com/docs/functions/runtimes/node-js
+-- https://vercel.com/docs/marketplace-storage
+-- https://github.com/neondatabase/serverless
+diff --git a/api/admin.js b/api/admin.js
+deleted file mode 100644
+index 3211f56..0000000
+--- a/api/admin.js
++++ /dev/null
+@@ -1,2 +0,0 @@
+-import { createAdminHandler } from '../lib/admin.js';
+-export default { fetch: createAdminHandler() };
+diff --git a/api/sessions.js b/api/sessions.js
+deleted file mode 100644
+index cd9847e..0000000
+--- a/api/sessions.js
++++ /dev/null
+@@ -1,3 +0,0 @@
+-import { createSessionsHandler } from '../lib/sessions.js';
+-import { createStore } from '../lib/database.js';
+-export default { fetch: createSessionsHandler({ storeFactory: createStore }) };
+diff --git a/api/signups.js b/api/signups.js
+deleted file mode 100644
+index e7e6fc4..0000000
+--- a/api/signups.js
++++ /dev/null
+@@ -1,3 +0,0 @@
+-import { createSignupsHandler } from '../lib/signups.js';
+-import { createStore } from '../lib/database.js';
+-export default { fetch: createSignupsHandler({ storeFactory: createStore }) };
+diff --git a/lib/admin-page.js b/lib/admin-page.js
+index 8c3933e..1e24a6c 100644
+--- a/lib/admin-page.js
++++ b/lib/admin-page.js
+@@ -105,7 +105,7 @@ export function adminPage(name) {
+       <div class="builder__out">
+         <h2>On the Website</h2>
+         <p class="form-note">Upcoming sessions, plus any from the last 30 days.</p>
+-        <p class="form-note" id="a-del-off" hidden>Deleting is switched off. Set DELETE_PASSWORD in Vercel and redeploy to turn it on.</p>
++        <p class="form-note" id="a-del-off" hidden>Deleting is switched off. Set DELETE_PASSWORD in Cloudflare and redeploy to turn it on.</p>
+         <div>
+           <div class="admin-tools" id="a-tools" hidden>
+             <label class="admin-check"><input type="checkbox" id="a-all"> Select all</label>
+@@ -137,7 +137,7 @@ export function adminPage(name) {
+           <button class="btn btn--secondary btn--small" type="button" id="g-refresh">Refresh</button>
+         </div>
+       </div>
+-      <p class="form-note" id="g-del-off" hidden>Deleting is switched off. Set DELETE_PASSWORD in Vercel and redeploy to turn it on.</p>
++      <p class="form-note" id="g-del-off" hidden>Deleting is switched off. Set DELETE_PASSWORD in Cloudflare and redeploy to turn it on.</p>
+       <div class="signups__tools">
+         <div class="admin-tools admin-tools--alone" id="g-tools" hidden>
+           <label class="admin-check"><input type="checkbox" id="g-all"> Select all</label>
+diff --git a/lib/admin.js b/lib/admin.js
+index fc8fad0..3f87533 100644
+--- a/lib/admin.js
++++ b/lib/admin.js
+@@ -9,7 +9,7 @@ export function createAdminHandler({ env = process.env } = {}) {
+   return async function admin(request) {
+     if (!['GET', 'HEAD'].includes(request.method)) return json(405, { error: 'Method not allowed.' }, { Allow: 'GET, HEAD' });
+     const logins = parseLogins(env.ADMIN_LOGINS);
+-    if (!logins.size) return json(503, { error: 'No admin logins are set. Add ADMIN_LOGINS in Vercel and redeploy.' });
++    if (!logins.size) return json(503, { error: 'No admin logins are set. Add ADMIN_LOGINS in Cloudflare and redeploy.' });
+     const name = adminFrom(request, logins);
+     if (!name) return json(401, { error: 'Sign in with your YME admin username and password.' }, challenge);
+     return new Response(request.method === 'HEAD' ? null : adminPage(name), {
+diff --git a/lib/auth.js b/lib/auth.js
+index 65a4649..265d5f8 100644
+--- a/lib/auth.js
++++ b/lib/auth.js
+@@ -48,7 +48,7 @@ export const challenge = { 'WWW-Authenticate': 'Basic realm="YME admins", charse
+ /* For admin-only requests: { admin } when signed in, otherwise { response } to send back. */
+ export function signedIn(request, env) {
+   const logins = parseLogins(env.ADMIN_LOGINS);
+-  if (!logins.size) return { response: json(503, { error: 'No admin logins are set. Add ADMIN_LOGINS in Vercel and redeploy.' }) };
++  if (!logins.size) return { response: json(503, { error: 'No admin logins are set. Add ADMIN_LOGINS in Cloudflare and redeploy.' }) };
+   const admin = adminFrom(request, logins);
+   if (!admin) return { response: json(401, { error: 'Sign in with your YME admin username and password.' }, challenge) };
+   return { admin };
+diff --git a/lib/database.js b/lib/database.js
+index f490bb3..0063ae3 100644
+--- a/lib/database.js
++++ b/lib/database.js
+@@ -1,6 +1,6 @@
+ import { neon } from '@neondatabase/serverless';
+ 
+-/* Sessions stored in Neon (Postgres). Used on Vercel; server.mjs uses lib/sqlite-store.js locally. */
++/* Sessions stored in Neon (Postgres). Used on Cloudflare (worker.js); server.mjs uses lib/sqlite-store.js locally. */
+ export function createStore(connectionString) {
+   const sql = neon(connectionString);
+   return {
+diff --git a/lib/sessions.js b/lib/sessions.js
+index 3e8a176..9b7c156 100644
+--- a/lib/sessions.js
++++ b/lib/sessions.js
+@@ -36,7 +36,7 @@ export function createSessionsHandler({ env = process.env, storeFactory } = {})
+   return async function sessions(request) {
+     const method = request.method;
+     if (!['GET', 'POST', 'DELETE'].includes(method)) return json(405, { error: 'Method not allowed.' }, { Allow: 'GET, POST, DELETE' });
+-    if (!env.DATABASE_URL) return json(503, { error: 'The database is not connected. Set DATABASE_URL in Vercel and redeploy.' });
++    if (!env.DATABASE_URL) return json(503, { error: 'The database is not connected. Set DATABASE_URL in Cloudflare and redeploy.' });
+     const url = new URL(request.url);
+     const adminOnly = method !== 'GET' || url.searchParams.get('scope') === 'admin';
+     let admin = null;
+@@ -54,7 +54,7 @@ export function createSessionsHandler({ env = process.env, storeFactory } = {})
+       }
+       if (!sameOrigin(request)) return json(403, { error: 'Please manage sessions from the YME admin page.' });
+       if (!isJson(request)) return json(415, { error: 'Please use the admin page.' });
+-      if (method === 'DELETE' && !deletePassword(env)) return json(503, { error: 'Deleting is switched off. Add DELETE_PASSWORD in Vercel and redeploy.' });
++      if (method === 'DELETE' && !deletePassword(env)) return json(503, { error: 'Deleting is switched off. Add DELETE_PASSWORD in Cloudflare and redeploy.' });
+       let data;
+       try { data = await readJson(request); } catch { return json(400, { error: 'We could not read that request. Please try again.' }); }
+       if (method === 'DELETE') {
+diff --git a/lib/signups.js b/lib/signups.js
+index 5c22a57..7090bfd 100644
+--- a/lib/signups.js
++++ b/lib/signups.js
+@@ -33,7 +33,7 @@ export function createSignupsHandler({ env = process.env, storeFactory } = {}) {
+   return async function signups(request) {
+     const method = request.method;
+     if (!['GET', 'POST', 'DELETE'].includes(method)) return json(405, { error: 'Method not allowed.' }, { Allow: 'GET, POST, DELETE' });
+-    if (!env.DATABASE_URL) return json(503, { error: 'The database is not connected. Set DATABASE_URL in Vercel and redeploy.' });
++    if (!env.DATABASE_URL) return json(503, { error: 'The database is not connected. Set DATABASE_URL in Cloudflare and redeploy.' });
+     if (method !== 'POST') {
+       const gate = signedIn(request, env);
+       if (gate.response) return gate.response;
+@@ -43,7 +43,7 @@ export function createSignupsHandler({ env = process.env, storeFactory } = {}) {
+       if (method === 'GET') return json(200, { canDelete: Boolean(deletePassword(env)), signups: await store.signups() });
+       if (!sameOrigin(request)) return json(403, { error: method === 'POST' ? 'Please sign up on the YME website.' : 'Please manage sign-ups from the YME admin page.' });
+       if (!isJson(request)) return json(415, { error: 'Please use the form on the website.' });
+-      if (method === 'DELETE' && !deletePassword(env)) return json(503, { error: 'Deleting is switched off. Add DELETE_PASSWORD in Vercel and redeploy.' });
++      if (method === 'DELETE' && !deletePassword(env)) return json(503, { error: 'Deleting is switched off. Add DELETE_PASSWORD in Cloudflare and redeploy.' });
+       let data;
+       try { data = await readJson(request); } catch { return json(400, { error: 'We could not read that request. Please try again.' }); }
+       if (method === 'DELETE') {
+diff --git a/package-lock.json b/package-lock.json
+index b375311..88c32e4 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -10,10 +10,1145 @@
+       "dependencies": {
+         "@neondatabase/serverless": "1.1.0"
+       },
++      "devDependencies": {
++        "wrangler": "4.156.0"
++      },
+       "engines": {
+         "node": "24.x"
+       }
+     },
++    "node_modules/@cloudflare/kv-asset-handler": {
++      "version": "0.5.0",
++      "resolved": "https://registry.npmjs.org/@cloudflare/kv-asset-handler/-/kv-asset-handler-0.5.0.tgz",
++      "integrity": "sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg==",
++      "dev": true,
++      "license": "MIT OR Apache-2.0",
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@cloudflare/unenv-preset": {
++      "version": "2.16.2",
++      "resolved": "https://registry.npmjs.org/@cloudflare/unenv-preset/-/unenv-preset-2.16.2.tgz",
++      "integrity": "sha512-JBP1+Z7ZSNG/d4mRP+y8VC5dka3tZVMLEZRvS+rzQ4DGV1EoxRFQckcJTTkXbHSQiTj0DtNI01Zwb/V2fX0mvQ==",
++      "dev": true,
++      "license": "MIT OR Apache-2.0",
++      "peerDependencies": {
++        "unenv": "2.0.0-rc.24",
++        "workerd": ">1.20260305.0 <2.0.0-0"
++      },
++      "peerDependenciesMeta": {
++        "workerd": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@cloudflare/workerd-darwin-64": {
++      "version": "1.20261023.1",
++      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-darwin-64/-/workerd-darwin-64-1.20261023.1.tgz",
++      "integrity": "sha512-lsEx0i7nR0PNG/erUFFHmQmiidEhLfDE5uQmAL9421/y4/ycuxDDOSaxu3VGGYFFPK5sduyUeMmjIlX4CwOBFg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cloudflare/workerd-darwin-arm64": {
++      "version": "1.20261023.1",
++      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-darwin-arm64/-/workerd-darwin-arm64-1.20261023.1.tgz",
++      "integrity": "sha512-5e79fHgabdDD8EgmjOhJ1S+xMsf6DbC7fL7IgTBizMnzOp0P2isDn7pYmUxI9AJZE9FVQ4RUilH/I36YNg+GQQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cloudflare/workerd-linux-64": {
++      "version": "1.20261023.1",
++      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-linux-64/-/workerd-linux-64-1.20261023.1.tgz",
++      "integrity": "sha512-VHQ6jKFSihjR2+x1buby8XTdBLLJztVnYiB7OLOTYO8aDXB+c1Rd2410PdgFuFYc4AgFEk6PCJLyCLL5L1KBnw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cloudflare/workerd-linux-arm64": {
++      "version": "1.20261023.1",
++      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-linux-arm64/-/workerd-linux-arm64-1.20261023.1.tgz",
++      "integrity": "sha512-ilpRHzfDN8YFRM5CLRKuFw40x/LJBS89yVdhdQmxehlVDuBqjKpJB++zPFbTgKRRFaNupgnXc8RHktXAIhgCmQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cloudflare/workerd-windows-64": {
++      "version": "1.20261023.1",
++      "resolved": "https://registry.npmjs.org/@cloudflare/workerd-windows-64/-/workerd-windows-64-1.20261023.1.tgz",
++      "integrity": "sha512-279WLVjNsMycAwr0EZNiNEf0l2SY6NUtsN80NwZzbTHzakmiN+WSx4w38muxPm+PAU0oSPPAPXKVD+H6Hya8xw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=16"
++      }
++    },
++    "node_modules/@cspotcode/source-map-support": {
++      "version": "0.8.1",
++      "resolved": "https://registry.npmjs.org/@cspotcode/source-map-support/-/source-map-support-0.8.1.tgz",
++      "integrity": "sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/trace-mapping": "0.3.9"
++      },
++      "engines": {
++        "node": ">=12"
++      }
++    },
++    "node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "resolved": "https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.11.3.tgz",
++      "integrity": "sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA==",
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@esbuild/aix-ppc64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/aix-ppc64/-/aix-ppc64-0.28.2.tgz",
++      "integrity": "sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "aix"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/android-arm": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/android-arm/-/android-arm-0.28.2.tgz",
++      "integrity": "sha512-kXXoiPVVGQcnIYGOeaovwOURpniDBpSq4A03qkQ+BMQqtGG6HYap3xne9C1O1yo4TR3qxlCX5IqqmX6fFo2Lqg==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/android-arm64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/android-arm64/-/android-arm64-0.28.2.tgz",
++      "integrity": "sha512-5YfKeeI8qWfBZIX+u2xZC3Zlb3Os/gLS2sbEKM+I4ZOcsWmHS2WLysCcQZDAFRslDUU5Oiq44gf6PYN1vGwG5A==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/android-x64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/android-x64/-/android-x64-0.28.2.tgz",
++      "integrity": "sha512-O387ite7SzUyCcy3JQX4P4bLtEA7bLLkx+esve5JHnyYfNTxcVpXZo9jhdB0lTKN44gztELTdU7nS8Nr16Fs1Q==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "android"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/darwin-arm64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.28.2.tgz",
++      "integrity": "sha512-n4KqkOQrraxHJcgjM1RvwbigfQKIKJVpM7xp+KsxiyUSrRdIXnt73VhrPAx0fV44hgfmIVKjxMN9J1t5jySVkw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/darwin-x64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/darwin-x64/-/darwin-x64-0.28.2.tgz",
++      "integrity": "sha512-uq6suIWYP37qzGddBKPw5QEQPi6HiLGsO7UmkpfyaYNQ3D+rN6w6WfwH+nuqcGXWvawGwxOEroO4YGnFh95azw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/freebsd-arm64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/freebsd-arm64/-/freebsd-arm64-0.28.2.tgz",
++      "integrity": "sha512-n+I0BTSRIoy+d6RPKnEVwql5UwBJolytvY4mAOIEJorKlqgPII8ix6slVVrfZ5Tnj7glIZvloylbB/EJPMWEXw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/freebsd-x64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/freebsd-x64/-/freebsd-x64-0.28.2.tgz",
++      "integrity": "sha512-78XJTJkvPs0kz2w61301PJjXl4g7q3JqiYMZ/M/yVI73EHBrCRTgkhu9oqG7vPqq+a/yadEW8aD+agKlk5xrmg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-arm": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-arm/-/linux-arm-0.28.2.tgz",
++      "integrity": "sha512-XlDnu2q5yoqems+xay6wSAcg9DDD7K9RLKZEBOMZm3ckNpJBvOX20tSfby8KfrrhINDyv9V2YVZKY/SpoGJI8w==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-arm64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.28.2.tgz",
++      "integrity": "sha512-pW4AC0P3it8c7do9MVM4p51FzHzdM/TZrerurgRcHJ2WTa1VQ1CIq18xncfpBJw4ojkiZZrKW2yIBWBP92j6Ug==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-ia32": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-ia32/-/linux-ia32-0.28.2.tgz",
++      "integrity": "sha512-CYbnj78HsIeA+DhgUKgFCfvNsTHFhMMrinUrMZpDXJXKN8T3XViTZ/+wtHeVxEWY8ewSzTFN+nRmSwO2tZaLUQ==",
++      "cpu": [
++        "ia32"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-loong64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-loong64/-/linux-loong64-0.28.2.tgz",
++      "integrity": "sha512-buwkd8nsph4R+ajRvw0qM5Hja/TXQow3ptzWO2EbG/cqcIkHloRrdlBtQlshyYGTNFvfkfJ5tpPLVkY4DtsPfQ==",
++      "cpu": [
++        "loong64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-mips64el": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-mips64el/-/linux-mips64el-0.28.2.tgz",
++      "integrity": "sha512-ZVykbDyk7519VwiNb9Lcj9m8XM6v5V9uKPvrEMkkEedVewf+0itkhahp4HDpgERXhwLRpWFypsGbG/J8s0QjJA==",
++      "cpu": [
++        "mips64el"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-ppc64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-ppc64/-/linux-ppc64-0.28.2.tgz",
++      "integrity": "sha512-CAXl+Dtd9UUuJd8pKKdwh6MLm3MUMiqMPmhZ3tTSXPqfyQ3vDl6R5hZdZ/kYojK4ofXtdfSv1tFq8XzWx3heNQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-riscv64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-riscv64/-/linux-riscv64-0.28.2.tgz",
++      "integrity": "sha512-GeXCej4IQtU1B+QlDV8W/RRvbzI3O/Stss+/bCXv4lZls5WGRtu2a+3JkA3i4qIUlMXpcHebWpF8AkJhATowuA==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-s390x": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-s390x/-/linux-s390x-0.28.2.tgz",
++      "integrity": "sha512-3H1weTYZPxt/WOhByszQZybS9w5lKzUn1FDMsgEChbHWQwHYQQRfBxgCcZvPhjHfKyJjIievvMmEUawJrdY9Dg==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/linux-x64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz",
++      "integrity": "sha512-4xTZr1FUmSoQW4XIWmit3tzQrUTZM+N3P0XV8xROKYF50XfI7xeO90+1bZvNwxIufQ9hDQVRJH5YhgPVF8A/HQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/netbsd-arm64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/netbsd-arm64/-/netbsd-arm64-0.28.2.tgz",
++      "integrity": "sha512-sSATRjPeDBg3pdgHoQfoYBob11Kk1FGa9lui5RIHZCoCkJa9QKlvl3/vKz2usCmYYjs7ymJR/2Nnsqe+Hjt5nw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "netbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/netbsd-x64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/netbsd-x64/-/netbsd-x64-0.28.2.tgz",
++      "integrity": "sha512-lqnzCV+mM0gIADaKihiCg6ifgfU2L3h5E33rNQBN1Y4MaVGnzryzmvvf7UHxprpQdE8hpqLolJ9Rl+SkIRDpyw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "netbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/openbsd-arm64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/openbsd-arm64/-/openbsd-arm64-0.28.2.tgz",
++      "integrity": "sha512-AL2qJILH7lNjrDmCQDvdxMfAUIv8KMNZOvrwAQ8i8//ntL9FflhOyMJ8OZSMBb8/AWXe3/5v5S20y3zCoZWKoQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/openbsd-x64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/openbsd-x64/-/openbsd-x64-0.28.2.tgz",
++      "integrity": "sha512-QtiuPytchRyC4rwUKhexJdQKvDuZ6hWloi3igqPQNUJCS1/v9EiO3UTOXR6A3FoMo4fnAKbWJdqaIwhOzh8qEw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openbsd"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/openharmony-arm64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/openharmony-arm64/-/openharmony-arm64-0.28.2.tgz",
++      "integrity": "sha512-WkhYDmpTjLvGlScA1rwjRUmhl4k8oXR3cIbtqWmELgU/dFeHHlEllxDvdWcNJV9rbzCexB5vz8gtNewWLgCT7Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "openharmony"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/sunos-x64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/sunos-x64/-/sunos-x64-0.28.2.tgz",
++      "integrity": "sha512-GPMSkTOtMnv2U2F8gxe4Io6qmVs+YKyp832Etqqxr0hFngmXQ3rzwytelm3GIn7T4VviRUlf3sOgBOiTdvaf7g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "sunos"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/win32-arm64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/win32-arm64/-/win32-arm64-0.28.2.tgz",
++      "integrity": "sha512-PIhhEkE9uPBleRBrQEJpUn7MBnibZzbGzYWPmY3x+YoVg/95zbjB4CxPPOQ8l5tYYM4mMaCthF8/1DIfBQQyWQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/win32-ia32": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/win32-ia32/-/win32-ia32-0.28.2.tgz",
++      "integrity": "sha512-YmJbfTlvU7Sdn9BB+4PRES4oB6pxgS37MAONj+hBr/cpXS1aBPKXxNnDbu+QCWPj0o9dgyxeq79g6c5P8KeuYA==",
++      "cpu": [
++        "ia32"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@esbuild/win32-x64": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.28.2.tgz",
++      "integrity": "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@img/colour": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz",
++      "integrity": "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@img/sharp-darwin-arm64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-darwin-arm64/-/sharp-darwin-arm64-0.35.5.tgz",
++      "integrity": "sha512-QRUlFQ0WxvdWyqqG/WtI3iupfD5rBzmCHXSdPsY91sAtVtTo7Q4cb6zOccZ3gqEqkr0f1As1ehLqmEpDsRf+lg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-darwin-arm64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-darwin-x64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-darwin-x64/-/sharp-darwin-x64-0.35.5.tgz",
++      "integrity": "sha512-+BR255RhDlpygUpOc/Jdt1nT6DQ3XG/ERo5wbcdOf5Q320dKtPCKPLR1LJs9VGXRaMa8l1uUa0tkCNOXiAxZUw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-darwin-x64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-freebsd-wasm32": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-freebsd-wasm32/-/sharp-freebsd-wasm32-0.35.5.tgz",
++      "integrity": "sha512-Y/z91nEZ4uIBX5X3nfTovjU9lHNKFYbL2lpHCLVNmXQK03VIZvXBBt0KxbPGp2SdGSF+2mQU4e+hQaWOt86iAw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "dependencies": {
++        "@img/sharp-wasm32": "0.35.5"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-darwin-arm64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.3.4.tgz",
++      "integrity": "sha512-5R89nBYiRdUlSWJxPhO+GVtaXzXSxKnRu/xqMn3KTA3L9EB9Oy/P+Nn2f2vlhPuUdy/Zusb2DarbyTpGCfEDuw==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-darwin-x64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-darwin-x64/-/sharp-libvips-darwin-x64-1.3.4.tgz",
++      "integrity": "sha512-iR2OKH80yi0U+dUplyh3/xdpFvps6YkCwsXenIJxqxR1v9o+xtKTGbS9H7cps+2Vxjc8B1j96p75NmTGjIhtpQ==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-arm": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-arm/-/sharp-libvips-linux-arm-1.3.4.tgz",
++      "integrity": "sha512-LmRtTsOHuvM2+wlO2Db37dx5MiZhB0FvSunciw48YjdOkZz9KAiRbm8ujeMOA1INqmei5NapFxYEK1D1ZSidmw==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-arm64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-arm64/-/sharp-libvips-linux-arm64-1.3.4.tgz",
++      "integrity": "sha512-Y3dgX/6lE2QhQb+Gxy0WZxfg9MEm/JBjamZpS2IklP7xIQoKN4hzAm7KcMVGtaVDt3neE9OKBC7vAfonA/Lr1A==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-ppc64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-ppc64/-/sharp-libvips-linux-ppc64-1.3.4.tgz",
++      "integrity": "sha512-Le6boB8Tai0Nis+gIxIpKx68UDVVIqdR8Tin5Yf1z2LJJQLDJvCDRqRu+jC2qCoD+eIomonmOwB4smBRxfVpYQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-riscv64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-riscv64/-/sharp-libvips-linux-riscv64-1.3.4.tgz",
++      "integrity": "sha512-aHkkIEHPRdQEegJN20MLmGtxYD9R2wQr3Cwpddnu5+YKMt6Uzax7S9h5gpZTo8wyrGuZSlfQ63OevL5mTyOC7Q==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-s390x": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-s390x/-/sharp-libvips-linux-s390x-1.3.4.tgz",
++      "integrity": "sha512-ra/mB6MikESDUO7Yg+Mi95bFBb9GsObURuhnOv3OqknjGe9sZrG8tCe9q0xSIGrtLgvgw0gKnFWcK4blSgQOuQ==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-x64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-x64/-/sharp-libvips-linux-x64-1.3.4.tgz",
++      "integrity": "sha512-GJ//SSXbnwSDes02umB3nDJLFcQzw8a18V8fyhqr6tV515tOEMdImjjxj1AoafMRz56F3PHgftnj1QEKSU1zkw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linuxmusl-arm64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linuxmusl-arm64/-/sharp-libvips-linuxmusl-arm64-1.3.4.tgz",
++      "integrity": "sha512-hvulFwtjUcagsis6BBxHwGFwWoNZjgYmULGVrZcyfNbjA8hKILbRxGg15/7w5HDyXHXUos/j6baAWqnCyQ2DWA==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linuxmusl-x64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linuxmusl-x64/-/sharp-libvips-linuxmusl-x64-1.3.4.tgz",
++      "integrity": "sha512-6zXKeE/p39I1AmA3cJG35eyBGNqNddLnUXjhwBnsGjFPWqf5VKkDBEqaEkPDoTEtkxwi2vv8Tcr2mDyP4So7Fg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-linux-arm": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-arm/-/sharp-linux-arm-0.35.5.tgz",
++      "integrity": "sha512-LEaXK2WdXVK5ykcw0buWyPMsmLLL2vpHLD6yrNSW+JGEL3BZPA4tpKN6iaMc4AxTTAoaX/sU1rOL51lcIz48ZQ==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-arm": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-arm64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-arm64/-/sharp-linux-arm64-0.35.5.tgz",
++      "integrity": "sha512-LYVx5JTsOM2CBzmxreh+nl64/3H6Xb09iSLknqH47z2T2DFFxDeFLP5y4dJwe6H7uGQlHPyEEtIqyo3DYsRwdQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-arm64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-ppc64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-ppc64/-/sharp-linux-ppc64-0.35.5.tgz",
++      "integrity": "sha512-QVxAAq8evVRI9ia2vqgwrmWucn5Dfv+JdWzj75pD8omHLPSP7f8p20O8jxzjCcuCEQEOtYOZUmX1hkiZ0kdevA==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-ppc64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-riscv64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-riscv64/-/sharp-linux-riscv64-0.35.5.tgz",
++      "integrity": "sha512-LtdreXguaavKODPIfzJ4kffx7UNt1omwtK0rch4EBbbSTXPnxWmYSayXdLJw0fJzQ97kHt1gL/yh4tvU+nCyRQ==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-riscv64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-s390x": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-s390x/-/sharp-linux-s390x-0.35.5.tgz",
++      "integrity": "sha512-UZasTOFiYzotTsGOCu42BfUzP6Tu6Do/947iRm1RsLKvlllxwGcn4RN27LibGWceix4Y+Pmw3jsnTcCQIgWjqA==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-s390x": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-x64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-x64/-/sharp-linux-x64-0.35.5.tgz",
++      "integrity": "sha512-SxFtLTeJInhAA9Q836kux2vZNeOBQEx658qvbboZScr0wIARym3IcGmW7KpVD5sbVg0Ojy+udFQdayYIZyoNog==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-x64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linuxmusl-arm64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linuxmusl-arm64/-/sharp-linuxmusl-arm64-0.35.5.tgz",
++      "integrity": "sha512-9HbMclmI1zlNkFRs3z9/eBtDjfD0sGlrX1z6b1qwmiFY5ElDLh4BC0LPBdVp7z1DXFiKlIcznf+ZlsuZzLxQqg==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linuxmusl-arm64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linuxmusl-x64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linuxmusl-x64/-/sharp-linuxmusl-x64-0.35.5.tgz",
++      "integrity": "sha512-4KOphqB035HrVdqLZfCgMzzERrQkkzOwRhl4OAkRO1YCldbaFjySXMaK534Mo0V+LndnlJk+sbUyLeU0ULyD1A==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linuxmusl-x64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-wasm32": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-wasm32/-/sharp-wasm32-0.35.5.tgz",
++      "integrity": "sha512-Ptsga1su4tQx+LLF1ECS9U6nz5kmrXKo6XVbtR48Ke3ZRxxgaWBu7IDtEe1quo8hiupwm6WFqxVlXaSf7IINGQ==",
++      "dev": true,
++      "license": "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/runtime": "^1.11.3"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-webcontainers-wasm32": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-webcontainers-wasm32/-/sharp-webcontainers-wasm32-0.35.5.tgz",
++      "integrity": "sha512-hfhF/FmoQyTUkA0bIKFOtw536BQSeBMe6BF6QyWlrPxT754+TFLaZ7sKKTfvvM0yJgKgaYTwnFCIZ/GuDw5SUA==",
++      "cpu": [
++        "wasm32"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "dependencies": {
++        "@img/sharp-wasm32": "0.35.5"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-win32-arm64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-win32-arm64/-/sharp-win32-arm64-0.35.5.tgz",
++      "integrity": "sha512-X4t7g+7ZA5DKblCBEXGjUqqemj4vczING/5viFwAL8h4N3qYeyjwdCvRLHi4EdOUI+2Z7UFlp1VM+p/AuEtm6Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0 AND LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-win32-ia32": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-win32-ia32/-/sharp-win32-ia32-0.35.5.tgz",
++      "integrity": "sha512-5Zm82LoBc43nhwNybZlG7Y1KO//Zhsn306fQl29ZOuStHLGTo3BWL83q3cznX0poxSAMuYL1On/BHBxkBeKr6A==",
++      "cpu": [
++        "ia32"
++      ],
++      "dev": true,
++      "license": "Apache-2.0 AND LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-win32-x64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-win32-x64/-/sharp-win32-x64-0.35.5.tgz",
++      "integrity": "sha512-x76eH0vEiHlcMQu8Y8IenntaACtddpT6W0wmXtWrnKcnKI7ME5DdgqhAD6SEWOEl1v2zDvkZDhFA9KnURwpfqg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0 AND LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@jridgewell/resolve-uri": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz",
++      "integrity": "sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/@jridgewell/sourcemap-codec": {
++      "version": "1.6.0",
++      "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
++      "integrity": "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@jridgewell/trace-mapping": {
++      "version": "0.3.9",
++      "resolved": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.9.tgz",
++      "integrity": "sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@jridgewell/resolve-uri": "^3.0.3",
++        "@jridgewell/sourcemap-codec": "^1.4.10"
++      }
++    },
+     "node_modules/@neondatabase/serverless": {
+       "version": "1.1.0",
+       "resolved": "https://registry.npmjs.org/@neondatabase/serverless/-/serverless-1.1.0.tgz",
+@@ -22,6 +1157,403 @@
+       "engines": {
+         "node": ">=19.0.0"
+       }
++    },
++    "node_modules/@poppinss/colors": {
++      "version": "4.1.6",
++      "resolved": "https://registry.npmjs.org/@poppinss/colors/-/colors-4.1.6.tgz",
++      "integrity": "sha512-H9xkIdFswbS8n1d6vmRd8+c10t2Qe+rZITbbDHHkQixH5+2x1FDGmi/0K+WgWiqQFKPSlIYB7jlH6Kpfn6Fleg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "kleur": "^4.1.5"
++      }
++    },
++    "node_modules/@poppinss/dumper": {
++      "version": "0.6.5",
++      "resolved": "https://registry.npmjs.org/@poppinss/dumper/-/dumper-0.6.5.tgz",
++      "integrity": "sha512-NBdYIb90J7LfOI32dOewKI1r7wnkiH6m920puQ3qHUeZkxNkQiFnXVWoE6YtFSv6QOiPPf7ys6i+HWWecDz7sw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@poppinss/colors": "^4.1.5",
++        "@sindresorhus/is": "^7.0.2",
++        "supports-color": "^10.0.0"
++      }
++    },
++    "node_modules/@poppinss/exception": {
++      "version": "1.2.3",
++      "resolved": "https://registry.npmjs.org/@poppinss/exception/-/exception-1.2.3.tgz",
++      "integrity": "sha512-dCED+QRChTVatE9ibtoaxc+WkdzOSjYTKi/+uacHWIsfodVfpsueo3+DKpgU5Px8qXjgmXkSvhXvSCz3fnP9lw==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/@sindresorhus/is": {
++      "version": "7.2.0",
++      "resolved": "https://registry.npmjs.org/@sindresorhus/is/-/is-7.2.0.tgz",
++      "integrity": "sha512-P1Cz1dWaFfR4IR+U13mqqiGsLFf1KbayybWwdd2vfctdV6hDpUkgCY0nKOLLTMSoRd/jJNjtbqzf13K8DCCXQw==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "url": "https://github.com/sindresorhus/is?sponsor=1"
++      }
++    },
++    "node_modules/@speed-highlight/core": {
++      "version": "1.2.24",
++      "resolved": "https://registry.npmjs.org/@speed-highlight/core/-/core-1.2.24.tgz",
++      "integrity": "sha512-qeW2e1l78afw8VhRPfPQ1Gjj+KU5XFQ/OFV5ti6eTa9bruO7mJyZtA4vw0ofqmA3tKCkROE9xLk3VZoeRc98nw==",
++      "dev": true,
++      "license": "CC0-1.0"
++    },
++    "node_modules/blake3-wasm": {
++      "version": "2.1.5",
++      "resolved": "https://registry.npmjs.org/blake3-wasm/-/blake3-wasm-2.1.5.tgz",
++      "integrity": "sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/cookie": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/cookie/-/cookie-1.1.1.tgz",
++      "integrity": "sha512-ei8Aos7ja0weRpFzJnEA9UHJ/7XQmqglbRwnf2ATjcB9Wq874VKH9kfjjirM6UhU2/E5fFYadylyhFldcqSidQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/express"
++      }
++    },
++    "node_modules/detect-libc": {
++      "version": "2.1.2",
++      "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
++      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/error-stack-parser-es": {
++      "version": "1.0.5",
++      "resolved": "https://registry.npmjs.org/error-stack-parser-es/-/error-stack-parser-es-1.0.5.tgz",
++      "integrity": "sha512-5qucVt2XcuGMcEGgWI7i+yZpmpByQ8J1lHhcL7PwqCwu9FPP3VUXzT4ltHe5i2z9dePwEHcDVOAfSnHsOlCXRA==",
++      "dev": true,
++      "license": "MIT",
++      "funding": {
++        "url": "https://github.com/sponsors/antfu"
++      }
++    },
++    "node_modules/esbuild": {
++      "version": "0.28.2",
++      "resolved": "https://registry.npmjs.org/esbuild/-/esbuild-0.28.2.tgz",
++      "integrity": "sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA==",
++      "dev": true,
++      "hasInstallScript": true,
++      "license": "MIT",
++      "bin": {
++        "esbuild": "bin/esbuild"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "optionalDependencies": {
++        "@esbuild/aix-ppc64": "0.28.2",
++        "@esbuild/android-arm": "0.28.2",
++        "@esbuild/android-arm64": "0.28.2",
++        "@esbuild/android-x64": "0.28.2",
++        "@esbuild/darwin-arm64": "0.28.2",
++        "@esbuild/darwin-x64": "0.28.2",
++        "@esbuild/freebsd-arm64": "0.28.2",
++        "@esbuild/freebsd-x64": "0.28.2",
++        "@esbuild/linux-arm": "0.28.2",
++        "@esbuild/linux-arm64": "0.28.2",
++        "@esbuild/linux-ia32": "0.28.2",
++        "@esbuild/linux-loong64": "0.28.2",
++        "@esbuild/linux-mips64el": "0.28.2",
++        "@esbuild/linux-ppc64": "0.28.2",
++        "@esbuild/linux-riscv64": "0.28.2",
++        "@esbuild/linux-s390x": "0.28.2",
++        "@esbuild/linux-x64": "0.28.2",
++        "@esbuild/netbsd-arm64": "0.28.2",
++        "@esbuild/netbsd-x64": "0.28.2",
++        "@esbuild/openbsd-arm64": "0.28.2",
++        "@esbuild/openbsd-x64": "0.28.2",
++        "@esbuild/openharmony-arm64": "0.28.2",
++        "@esbuild/sunos-x64": "0.28.2",
++        "@esbuild/win32-arm64": "0.28.2",
++        "@esbuild/win32-ia32": "0.28.2",
++        "@esbuild/win32-x64": "0.28.2"
++      }
++    },
++    "node_modules/fsevents": {
++      "version": "2.3.3",
++      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
++      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++      "dev": true,
++      "hasInstallScript": true,
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
++      }
++    },
++    "node_modules/kleur": {
++      "version": "4.1.5",
++      "resolved": "https://registry.npmjs.org/kleur/-/kleur-4.1.5.tgz",
++      "integrity": "sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
++    "node_modules/miniflare": {
++      "version": "5.20261023.3-beta",
++      "resolved": "https://registry.npmjs.org/miniflare/-/miniflare-5.20261023.3-beta.tgz",
++      "integrity": "sha512-thdXzlktu5GE1o/BlmMAPeJ0Cu6Tu5LpMbRlyfRrpVvMRrhd6p52TMqcITCZZLVzt1UO92VGBkLDhLOpryUAyQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@cspotcode/source-map-support": "0.8.1",
++        "sharp": "0.35.5",
++        "undici": "7.30.1",
++        "workerd": "1.20261023.1",
++        "ws": "8.21.0",
++        "youch": "4.1.0-beta.10"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/path-to-regexp": {
++      "version": "6.3.0",
++      "resolved": "https://registry.npmjs.org/path-to-regexp/-/path-to-regexp-6.3.0.tgz",
++      "integrity": "sha512-Yhpw4T9C6hPpgPeA28us07OJeqZ5EzQTkbfwuhsUg0c237RomFoETJgmp2sa3F/41gfLE6G5cqcYwznmeEeOlQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/pathe": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/pathe/-/pathe-2.0.3.tgz",
++      "integrity": "sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/semver": {
++      "version": "7.8.5",
++      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.5.tgz",
++      "integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
++      "dev": true,
++      "license": "ISC",
++      "bin": {
++        "semver": "bin/semver.js"
++      },
++      "engines": {
++        "node": ">=10"
++      }
++    },
++    "node_modules/sharp": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/sharp/-/sharp-0.35.5.tgz",
++      "integrity": "sha512-Ywn4OnzGukp7CDMrp08RQ50YKmuwG47brZgIVPTvBaaAfQlRlygrRqSrxdCiL9M+LlzLBiJ68IR1QqvzHyjC7g==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "@img/colour": "^1.1.0",
++        "detect-libc": "^2.1.2",
++        "semver": "^7.8.5"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-darwin-arm64": "0.35.5",
++        "@img/sharp-darwin-x64": "0.35.5",
++        "@img/sharp-freebsd-wasm32": "0.35.5",
++        "@img/sharp-libvips-darwin-arm64": "1.3.4",
++        "@img/sharp-libvips-darwin-x64": "1.3.4",
++        "@img/sharp-libvips-linux-arm": "1.3.4",
++        "@img/sharp-libvips-linux-arm64": "1.3.4",
++        "@img/sharp-libvips-linux-ppc64": "1.3.4",
++        "@img/sharp-libvips-linux-riscv64": "1.3.4",
++        "@img/sharp-libvips-linux-s390x": "1.3.4",
++        "@img/sharp-libvips-linux-x64": "1.3.4",
++        "@img/sharp-libvips-linuxmusl-arm64": "1.3.4",
++        "@img/sharp-libvips-linuxmusl-x64": "1.3.4",
++        "@img/sharp-linux-arm": "0.35.5",
++        "@img/sharp-linux-arm64": "0.35.5",
++        "@img/sharp-linux-ppc64": "0.35.5",
++        "@img/sharp-linux-riscv64": "0.35.5",
++        "@img/sharp-linux-s390x": "0.35.5",
++        "@img/sharp-linux-x64": "0.35.5",
++        "@img/sharp-linuxmusl-arm64": "0.35.5",
++        "@img/sharp-linuxmusl-x64": "0.35.5",
++        "@img/sharp-webcontainers-wasm32": "0.35.5",
++        "@img/sharp-win32-arm64": "0.35.5",
++        "@img/sharp-win32-ia32": "0.35.5",
++        "@img/sharp-win32-x64": "0.35.5"
++      },
++      "peerDependenciesMeta": {
++        "@types/node": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/supports-color": {
++      "version": "10.2.2",
++      "resolved": "https://registry.npmjs.org/supports-color/-/supports-color-10.2.2.tgz",
++      "integrity": "sha512-SS+jx45GF1QjgEXQx4NJZV9ImqmO2NPz5FNsIHrsDjh2YsHnawpan7SNQ1o8NuhrbHZy9AZhIoCUiCeaW/C80g==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=18"
++      },
++      "funding": {
++        "url": "https://github.com/chalk/supports-color?sponsor=1"
++      }
++    },
++    "node_modules/tslib": {
++      "version": "2.8.1",
++      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
++      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
++      "dev": true,
++      "license": "0BSD",
++      "optional": true
++    },
++    "node_modules/undici": {
++      "version": "7.30.1",
++      "resolved": "https://registry.npmjs.org/undici/-/undici-7.30.1.tgz",
++      "integrity": "sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=20.18.1"
++      }
++    },
++    "node_modules/unenv": {
++      "version": "2.0.0-rc.24",
++      "resolved": "https://registry.npmjs.org/unenv/-/unenv-2.0.0-rc.24.tgz",
++      "integrity": "sha512-i7qRCmY42zmCwnYlh9H2SvLEypEFGye5iRmEMKjcGi7zk9UquigRjFtTLz0TYqr0ZGLZhaMHl/foy1bZR+Cwlw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "pathe": "^2.0.3"
++      }
++    },
++    "node_modules/workerd": {
++      "version": "1.20261023.1",
++      "resolved": "https://registry.npmjs.org/workerd/-/workerd-1.20261023.1.tgz",
++      "integrity": "sha512-NeofJFyaYNpqKpFRJW3ApuonaerPd6/JWlfTtLDYf2A6ygqrDEFnYgEXmc0hhOxqnJsSM+kXJN6VebPojzRrsg==",
++      "dev": true,
++      "hasInstallScript": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "workerd": "bin/workerd"
++      },
++      "engines": {
++        "node": ">=16"
++      },
++      "optionalDependencies": {
++        "@cloudflare/workerd-darwin-64": "1.20261023.1",
++        "@cloudflare/workerd-darwin-arm64": "1.20261023.1",
++        "@cloudflare/workerd-linux-64": "1.20261023.1",
++        "@cloudflare/workerd-linux-arm64": "1.20261023.1",
++        "@cloudflare/workerd-windows-64": "1.20261023.1"
++      }
++    },
++    "node_modules/wrangler": {
++      "version": "4.156.0",
++      "resolved": "https://registry.npmjs.org/wrangler/-/wrangler-4.156.0.tgz",
++      "integrity": "sha512-kVLAShuLiNgE3jcrmXcymDf/iPKDPrSxACe5ueugW/33HeNB9E9CkKYchudCeBwgmsnl4k+1zt4NO7vqb/fRuQ==",
++      "dev": true,
++      "license": "MIT OR Apache-2.0",
++      "dependencies": {
++        "@cloudflare/kv-asset-handler": "0.5.0",
++        "@cloudflare/unenv-preset": "2.16.2",
++        "blake3-wasm": "2.1.5",
++        "esbuild": "0.28.2",
++        "miniflare": "5.20261023.3-beta",
++        "path-to-regexp": "6.3.0",
++        "unenv": "2.0.0-rc.24",
++        "workerd": "1.20261023.1"
++      },
++      "bin": {
++        "cf-wrangler": "bin/cf-wrangler.js",
++        "wrangler": "bin/wrangler.js",
++        "wrangler2": "bin/wrangler.js"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      },
++      "optionalDependencies": {
++        "fsevents": "2.3.3"
++      },
++      "peerDependencies": {
++        "@cloudflare/workers-types": "^5.20261023.1"
++      },
++      "peerDependenciesMeta": {
++        "@cloudflare/workers-types": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/ws": {
++      "version": "8.21.0",
++      "resolved": "https://registry.npmjs.org/ws/-/ws-8.21.0.tgz",
++      "integrity": "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==",
++      "dev": true,
++      "license": "MIT",
++      "engines": {
++        "node": ">=10.0.0"
++      },
++      "peerDependencies": {
++        "bufferutil": "^4.0.1",
++        "utf-8-validate": ">=5.0.2"
++      },
++      "peerDependenciesMeta": {
++        "bufferutil": {
++          "optional": true
++        },
++        "utf-8-validate": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/youch": {
++      "version": "4.1.0-beta.10",
++      "resolved": "https://registry.npmjs.org/youch/-/youch-4.1.0-beta.10.tgz",
++      "integrity": "sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@poppinss/colors": "^4.1.5",
++        "@poppinss/dumper": "^0.6.4",
++        "@speed-highlight/core": "^1.2.7",
++        "cookie": "^1.0.2",
++        "youch-core": "^0.3.3"
++      }
++    },
++    "node_modules/youch-core": {
++      "version": "0.3.3",
++      "resolved": "https://registry.npmjs.org/youch-core/-/youch-core-0.3.3.tgz",
++      "integrity": "sha512-ho7XuGjLaJ2hWHoK8yFnsUGy2Y5uDpqSTq1FkHLK4/oqKtyUU1AFbOOxY4IpC9f0fTLjwYbslUz0Po5BpD1wrA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@poppinss/exception": "^1.2.2",
++        "error-stack-parser-es": "^1.0.5"
++      }
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index 9d1cb48..2016a0c 100644
+--- a/package.json
++++ b/package.json
+@@ -5,6 +5,8 @@
+   "type": "module",
+   "scripts": {
+     "start": "node server.mjs",
++    "preview": "wrangler dev",
++    "deploy": "wrangler deploy",
+     "test": "node --test tests/*.test.js"
+   },
+   "engines": {
+@@ -12,5 +14,8 @@
+   },
+   "dependencies": {
+     "@neondatabase/serverless": "1.1.0"
++  },
++  "devDependencies": {
++    "wrangler": "4.156.0"
+   }
+ }
+diff --git a/server.mjs b/server.mjs
+index 624bbdf..72c79ae 100644
+--- a/server.mjs
++++ b/server.mjs
+@@ -1,5 +1,5 @@
+ /* Local version of the YME website: serves public/ and runs the same sessions API and
+-   admin page as Vercel, with sessions saved in data/sessions.sqlite instead of Neon.
++   admin page as Cloudflare (worker.js), with sessions saved in data/sessions.sqlite instead of Neon.
+    Run: node server.mjs   then visit http://127.0.0.1:3000 (admin page: /admin). */
+ import { createServer } from 'node:http';
+ import { readFile, mkdir, stat } from 'node:fs/promises';
+@@ -33,7 +33,7 @@ const TYPES = {
+   '.json': 'application/json; charset=utf-8', '.xml': 'application/xml; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8'
+ };
+ 
+-/* Node request -> standard Request, so the Vercel handlers run unchanged. */
++/* Node request -> standard Request, so the Cloudflare handlers run unchanged. */
+ function toRequest(req) {
+   const headers = new Headers();
+   for (let i = 0; i < req.rawHeaders.length; i += 2) headers.append(req.rawHeaders[i], req.rawHeaders[i + 1]);
+diff --git a/tests/worker.test.js b/tests/worker.test.js
+new file mode 100644
+index 0000000..824cea1
+--- /dev/null
++++ b/tests/worker.test.js
+@@ -0,0 +1,32 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { createWorker } from '../worker.js';
++
++const SITE = 'https://www.medengineers.org';
++const basic = (name, password) => 'Basic ' + Buffer.from(`${name}:${password}`).toString('base64');
++
++/* Stands in for Cloudflare's static files: answers with the path it was asked for. */
++const assets = { async fetch(request) { return new Response(`file ${new URL(request.url).pathname}`); } };
++const env = { DATABASE_URL: 'test', ADMIN_LOGINS: 'derrick:pass-one', DELETE_PASSWORD: 'delete-me', ASSETS: assets };
++const store = { async upcoming() { return [{ id: 'one' }]; }, async signups() { return []; } };
++const worker = createWorker({ storeFactory: () => store });
++
++test('Cloudflare worker: the API and admin page run here, with settings from env', async () => {
++  const sessions = await worker.fetch(new Request(`${SITE}/api/sessions`), env);
++  assert.deepEqual(await sessions.json(), { sessions: [{ id: 'one' }] });
++  const signups = await worker.fetch(new Request(`${SITE}/api/signups`, { headers: { authorization: basic('derrick', 'pass-one') } }), env);
++  assert.equal(signups.status, 200);
++  for (const path of ['/admin', '/admin/']) {
++    assert.equal((await worker.fetch(new Request(SITE + path), env)).status, 401);
++    const page = await worker.fetch(new Request(SITE + path, { headers: { authorization: basic('derrick', 'pass-one') } }), env);
++    assert.match(await page.text(), /Signed in as <strong>derrick<\/strong>/);
++  }
++  const noLogins = await worker.fetch(new Request(`${SITE}/admin`), { ...env, ADMIN_LOGINS: '' });
++  assert.match((await noLogins.json()).error, /ADMIN_LOGINS in Cloudflare/);
++});
++
++test('Cloudflare worker: / is the home page; other paths are files from public/', async () => {
++  assert.equal(await (await worker.fetch(new Request(`${SITE}/`), env)).text(), 'file /index.html');
++  assert.equal(await (await worker.fetch(new Request(`${SITE}/about.html`), env)).text(), 'file /about.html');
++  assert.equal(await (await worker.fetch(new Request(`${SITE}/sessions.json`), env)).text(), 'file /sessions.json');
++});
+diff --git a/vercel.json b/vercel.json
+deleted file mode 100644
+index a86fd4c..0000000
+--- a/vercel.json
++++ /dev/null
+@@ -1,11 +0,0 @@
+-{
+-  "$schema": "https://openapi.vercel.sh/vercel.json",
+-  "framework": null,
+-  "installCommand": "npm ci",
+-  "buildCommand": "",
+-  "outputDirectory": "public",
+-  "rewrites": [
+-    { "source": "/admin", "destination": "/api/admin" },
+-    { "source": "/admin/", "destination": "/api/admin" }
+-  ]
+-}
+diff --git a/worker.js b/worker.js
+new file mode 100644
+index 0000000..4506b81
+--- /dev/null
++++ b/worker.js
+@@ -0,0 +1,23 @@
++/* The YME website on Cloudflare Workers: serves public/ and runs the session manager.
++   wrangler.jsonc sends /api/* and /admin here; every other request is a plain file from public/.
++   Admin logins and the database connection come from the Worker's settings (env), never from files. */
++import { createAdminHandler } from './lib/admin.js';
++import { createSessionsHandler } from './lib/sessions.js';
++import { createSignupsHandler } from './lib/signups.js';
++import { createStore } from './lib/database.js';
++
++export function createWorker({ storeFactory = createStore } = {}) {
++  return {
++    async fetch(request, env) {
++      const { pathname } = new URL(request.url);
++      if (pathname === '/api/sessions') return createSessionsHandler({ env, storeFactory })(request);
++      if (pathname === '/api/signups') return createSignupsHandler({ env, storeFactory })(request);
++      if (pathname === '/admin' || pathname === '/admin/') return createAdminHandler({ env })(request);
++      /* html_handling is "none" so pages keep their .html addresses; the home page still answers at / */
++      if (pathname === '/') return env.ASSETS.fetch(new Request(new URL('/index.html', request.url), request));
++      return env.ASSETS.fetch(request);
++    }
++  };
++}
++
++export default createWorker();
+diff --git a/wrangler.jsonc b/wrangler.jsonc
+new file mode 100644
+index 0000000..457ca8d
+--- /dev/null
++++ b/wrangler.jsonc
+@@ -0,0 +1,17 @@
++{
++  "$schema": "./node_modules/wrangler/config-schema.json",
++  "name": "yme-website",
++  "main": "worker.js",
++  "compatibility_date": "2026-10-01",
++  // node:crypto and Buffer, used by lib/auth.js and lib/http.js
++  "compatibility_flags": ["nodejs_compat"],
++  "assets": {
++    "directory": "./public",
++    "binding": "ASSETS",
++    // keep the .html addresses the pages link to, the sitemap lists and GitHub Pages used
++    "html_handling": "none",
++    // only these reach worker.js; every other request is served straight from public/
++    "run_worker_first": ["/", "/api/*", "/admin", "/admin/"]
++  },
++  "observability": { "enabled": true }
++}
+-- 
+2.43.0
+
